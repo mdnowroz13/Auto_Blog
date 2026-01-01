@@ -7,7 +7,7 @@ import os
 import re
 import json
 import sys
-from pytrends.request import TrendReq
+import xml.etree.ElementTree as ET
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -71,24 +71,48 @@ class AutoBlogger:
         return creds
 
     def get_trending_topic(self):
-        self.logger.info("Fetching trending topics...")
+        self.logger.info("Fetching trending topics (Source: Google News RSS)...")
+        topics = []
+        
+        # 1. Google News RSS (Free, No Auth, Reliable)
         try:
-            pytrends = TrendReq(hl='en-US', tz=360)
-            trending_searches = pytrends.trending_searches(pn='united_states')
-            topics = trending_searches[0].tolist()
-            
-            # Filter duplicates
-            for topic in topics[:10]:
+            # RSS Feed for Technology (Last 24h)
+            rss_url = "https://news.google.com/rss/search?q=technology+when:1d&hl=en-US&gl=US&ceid=US:en"
+            resp = requests.get(rss_url, timeout=10)
+            if resp.status_code == 200:
+                root = ET.fromstring(resp.content)
+                # Parse items
+                for item in root.findall('.//item'):
+                    title = item.find('title').text
+                    # Cleanup title (remove source name like " - The Verge")
+                    clean_title = title.split(' - ')[0]
+                    topics.append(clean_title)
+        except Exception as e:
+            self.logger.error(f"RSS Fetch failed: {e}")
+
+        # 2. NewsAPI Top Headlines (Free Tier Backup)
+        if not topics and self.news_api_key:
+             self.logger.info("RSS failed. Trying NewsAPI Headlines...")
+             try:
+                 url = f"https://newsapi.org/v2/top-headlines?category=technology&language=en&apiKey={self.news_api_key}"
+                 resp = requests.get(url, timeout=10)
+                 data = resp.json()
+                 for article in data.get('articles', [])[:5]:
+                     topics.append(article['title'])
+             except Exception as e:
+                 self.logger.error(f"NewsAPI Headlines failed: {e}")
+
+        # Filter & Select
+        if topics:
+            # Shuffle to avoid always picking the first one
+            random.shuffle(topics)
+            for topic in topics[:15]:
                 if not utils.is_duplicate_topic(topic, self.history):
                     self.logger.info(f"Selected Trend: {topic}")
                     return topic
-            
-            self.logger.warning("All top trends recently covered. Picking random one.")
-            return random.choice(topics[:5])
-        except Exception as e:
-            self.logger.error(f"Trend fetch failed: {e}")
-            self.logger.info("Using fallback topic strategy.")
-            return random.choice(FALLBACK_TOPICS)
+        
+        self.logger.warning("No fresh trends found. Using fallback.")
+        return random.choice(FALLBACK_TOPICS)
 
     def fetch_news(self, topic):
         self.logger.info(f"Fetching news for {topic}...")
