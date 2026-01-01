@@ -14,6 +14,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 import utils
 import seo_utils
+from traffic_engine import TrafficEngine
 
 # Configuration
 # Hard fallback topics in case Google Trends fails (404)
@@ -39,6 +40,15 @@ class AutoBlogger:
         self.hashnode_pat = utils.get_env('HASHNODE_PAT')
         self.devto_key = utils.get_env('DEVTO_API_KEY')
         self.blog_id = utils.get_env('BLOG_ID')
+        self.blog_url = utils.get_env('BLOG_URL', 'https://example.com')
+        self.indexnow_key = utils.get_env('INDEXNOW_KEY')
+        
+        self.traffic_engine = TrafficEngine(
+            creds=self.creds, 
+            blog_url=self.blog_url, 
+            indexnow_key=self.indexnow_key,
+            hf_token=self.hf_token
+        )
         
         self.validate_env()
 
@@ -52,25 +62,37 @@ class AutoBlogger:
             sys.exit(1)
 
     def _authenticate_google(self):
-        SCOPES = ['https://www.googleapis.com/auth/youtube.readonly', 'https://www.googleapis.com/auth/blogger']
+        SCOPES = ['https://www.googleapis.com/auth/youtube.readonly', 'https://www.googleapis.com/auth/blogger', 'https://www.googleapis.com/auth/webmasters']
         creds = None
         if os.path.exists('token.json'):
             creds = Credentials.from_authorized_user_file('token.json', SCOPES)
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
                 try:
-                    flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+                    creds.refresh(Request())
+                except Exception as e:
+                    self.logger.warning(f"Token refresh failed: {e}. Deleting invalid token.json.")
+                    if os.path.exists('token.json'):
+                        os.remove('token.json')
+                    creds = None
+            
+            if not creds:
+                try:
+                    flow = InstalledAppFlow.from_client_secrets_file('client_secrets.json', SCOPES)
+                    if self.dry_run:
+                        self.logger.warning("Skipping Google Auth in dry-run mode.")
+                        return None
                     creds = flow.run_local_server(port=0)
                 except Exception as e:
                     self.logger.error(f"Google Auth failed: {e}")
                     return None
-            with open('token.json', 'w') as token:
-                token.write(creds.to_json())
+            
+            if creds:
+                with open('token.json', 'w') as token:
+                    token.write(creds.to_json())
         return creds
 
-    def get_trending_topic(self):
+    def get_trending_topics(self):
         self.logger.info("Fetching trending topics (Source: Google News RSS)...")
         topics = []
         
@@ -102,13 +124,13 @@ class AutoBlogger:
 
         if topics:
             random.shuffle(topics)
-            for topic in topics[:15]:
-                if not utils.is_duplicate_topic(topic, self.history):
-                    self.logger.info(f"Selected Trend: {topic}")
-                    return topic
+            # Filter duplicates
+            unique_topics = [t for t in topics if not utils.is_duplicate_topic(t, self.history)]
+            if unique_topics:
+                return unique_topics[:15]
         
         self.logger.warning("No fresh trends found. Using fallback.")
-        return random.choice(FALLBACK_TOPICS)
+        return FALLBACK_TOPICS
 
     def fetch_news(self, topic):
         self.logger.info(f"Fetching news for {topic}...")
@@ -264,12 +286,18 @@ class AutoBlogger:
         md_base = f"# {title}\n\n"
         md_base += f"**{sections['intro']}**\n\n"
         
+        # Generate & Inject Summary
+        summary_html = self.traffic_engine.generate_summary(sections['body'])
+        
         if images:
             img = images[0]
             md_base += f"![{img['alt_description']}]({img['urls']['regular']})\n*Photo by {img['user']['name']} on Unsplash*\n\n"
         
         md_base += "## The Full Story\n"
         md_base += f"{sections['body']}\n\n"
+        
+        # Generate & Inject FAQ
+        faq_html = self.traffic_engine.generate_faq(sections['body'])
         
         md_base += "## Why It Matters\n"
         md_base += f"{sections['impact']}\n\n"
@@ -283,15 +311,15 @@ class AutoBlogger:
         md_base += "---\n"
         
         # Add Internal Links
-        related_links = ""
-        if len(self.history) > 0:
-            related_links = "<h3>Read More:</h3><ul>"
-            count = 0
-            for item in reversed(self.history):
-                if count >= 2: break
-                related_links += f"<li>{item['topic']}</li>" 
-                count += 1
-            related_links += "</ul>"
+        related_posts = self.traffic_engine.find_related_posts(topic, self.history)
+        
+        md_links = ""
+        if related_posts:
+            md_links = "\n\n### Read More:\n"
+            for p in related_posts:
+                md_links += f"- [{p['topic']}]({p.get('url', '#')})\n"
+        
+        md_base += md_links
 
         # Add Share Buttons
         share_html = f"""
@@ -372,7 +400,25 @@ class AutoBlogger:
              else:
                  html += iframe
         
-        html += related_links + share_html
+        html = self.traffic_engine.inject_internal_links(html, related_posts)
+        
+        # Inject Summary & FAQ into HTML
+        # Summary after Intro (first paragraph)
+        if summary_html:
+            # Simple injection after first </p> if not already done by video
+            if "</p>" in html and summary_html not in html:
+                 html = html.replace("</p>", "</p>" + summary_html, 1)
+            else:
+                 html = summary_html + html
+                 
+        # FAQ before Conclusion
+        if faq_html:
+             if "<h2>Conclusion</h2>" in html:
+                 html = html.replace("<h2>Conclusion</h2>", faq_html + "\n<h2>Conclusion</h2>")
+             else:
+                 html += faq_html
+
+        html += share_html
 
         # Add Schema & Meta
         schema = seo_utils.generate_schema(topic, sections['intro'])
@@ -479,8 +525,14 @@ class AutoBlogger:
                         if 'errors' in data:
                              self.logger.error(f"Hashnode API Errors: {data['errors']}")
                         elif data.get('data', {}).get('publishPost', {}).get('post'):
-                            published_url = data['data']['publishPost']['post']['url']
+                            post_data = data['data']['publishPost']['post']
+                            published_url = post_data['url']
+                            post_id = post_data['id']
                             self.logger.info(f"Published to Hashnode: {published_url}")
+                            
+                            # Boost
+                            utils.random_delay(10, 30)
+                            self.traffic_engine.boost_hashnode(post_id, pub_id, self.hashnode_pat)
                         else:
                             self.logger.error(f"Hashnode publish failed (Unknown response): {data}")
                     else:
@@ -504,9 +556,15 @@ class AutoBlogger:
                 }
                 res = requests.post("https://dev.to/api/articles", json=payload, headers={"api-key": self.devto_key})
                 if res.status_code in [200, 201]:
-                    url = res.json()['url']
+                    data = res.json()
+                    url = data['url']
+                    article_id = data['id']
                     self.logger.info(f"Published to Dev.to: {url}")
                     if published_url == "URL_PLACEHOLDER": published_url = url
+                    
+                    # Boost
+                    utils.random_delay(10, 30)
+                    self.traffic_engine.boost_devto(article_id, self.devto_key)
                 else:
                     self.logger.error(f"Dev.to publish failed: {res.status_code} - {res.text}")
             except Exception as e:
@@ -523,28 +581,77 @@ class AutoBlogger:
             except Exception as e:
                 self.logger.error(f"Blogger publish failed: {e}")
 
+        # Traffic Generation
+        if published_url and published_url != "URL_PLACEHOLDER":
+            self.traffic_engine.submit_to_gsc(published_url)
+            self.traffic_engine.ping_services(published_url)
+            self.traffic_engine.trigger_indexnow(published_url)
+
         # Update History
-        self.history.append({"topic": topic, "date": datetime.datetime.now().isoformat()})
+        self.history.append({
+            "topic": topic, 
+            "date": datetime.datetime.now().isoformat(),
+            "url": published_url
+        })
         utils.save_history(self.history)
 
+    def republish_cycle(self):
+        """Check for old posts and re-submit/boost them."""
+        self.logger.info("Running Re-Publish Cycle...")
+        cutoff = datetime.datetime.now() - datetime.timedelta(days=7)
+        
+        candidates = []
+        for entry in self.history:
+            try:
+                entry_date = datetime.datetime.fromisoformat(entry['date'])
+                if entry_date < cutoff:
+                    candidates.append(entry)
+            except: pass
+                
+        if not candidates:
+            self.logger.info("No old posts to republish.")
+            return
+
+        # Pick one random old post
+        post = random.choice(candidates)
+        url = post.get('url')
+        if not url or url == "URL_PLACEHOLDER":
+            return
+
+        self.logger.info(f"Republishing/Boosting old post: {post['topic']} ({url})")
+        
+        # 1. Re-Submit to Indexing
+        self.traffic_engine.submit_to_gsc(url)
+        self.traffic_engine.ping_services(url)
+        self.traffic_engine.trigger_indexnow(url)
+
     def run(self):
-        topic = self.get_trending_topic()
-        news = self.fetch_news(topic)
-        if not news:
-            self.logger.error("No news found. Aborting.")
-            return
-
-        images = self.fetch_images(topic)
-        video = self.fetch_video(topic)
+        topics = self.get_trending_topics()
         
-        sections = self.generate_content(topic, news)
-        if not sections:
-            self.logger.error("Content generation failed. Exiting.")
-            return
-
-        title, md_devto, md_hashnode, html = self.format_article(topic, sections, images, video)
+        for topic in topics:
+            self.logger.info(f"Attempting to blog about: {topic}")
+            news = self.fetch_news(topic)
+            if news:
+                images = self.fetch_images(topic)
+                video = self.fetch_video(topic)
+                
+                sections = self.generate_content(topic, news)
+                if sections:
+                    title, md_devto, md_hashnode, html = self.format_article(topic, sections, images, video)
+                    self.publish(title, md_devto, md_hashnode, html, topic)
+                    
+                    # Run Re-Publish Cycle
+                    self.republish_cycle()
+                    
+                    # Generate Analytics Report
+                    utils.generate_analytics_report()
+                    return # Success!
+                else:
+                    self.logger.warning(f"Content generation failed for {topic}. Trying next topic...")
+            else:
+                self.logger.warning(f"No news found for {topic}. Trying next topic...")
         
-        self.publish(title, md_devto, md_hashnode, html, topic)
+        self.logger.error("Failed to generate a blog post for any trending topic.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

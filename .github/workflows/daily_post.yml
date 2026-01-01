@@ -1,0 +1,50 @@
+name: Daily Auto-Blogger
+
+on:
+  schedule:
+    - cron: '0 9 * * *' # Runs every day at 9:00 AM UTC
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Create .env file
+      run: |
+        echo "NEWSAPI_KEY=${{ secrets.NEWSAPI_KEY }}" >> .env
+        echo "UNSPLASH_KEY=${{ secrets.UNSPLASH_KEY }}" >> .env
+        echo "HF_TOKEN=${{ secrets.HF_TOKEN }}" >> .env
+        echo "HASHNODE_PAT=${{ secrets.HASHNODE_PAT }}" >> .env
+        echo "DEVTO_API_KEY=${{ secrets.DEVTO_API_KEY }}" >> .env
+        echo "BLOG_ID=${{ secrets.BLOG_ID }}" >> .env
+        echo "BLOG_URL=${{ secrets.BLOG_URL }}" >> .env
+        echo "INDEXNOW_KEY=${{ secrets.INDEXNOW_KEY }}" >> .env
+
+    - name: Create token.json
+      run: |
+        echo '${{ secrets.GOOGLE_TOKEN_JSON }}' > token.json
+
+    - name: Run Auto-Blogger
+      run: python app.py
+
+    - name: Commit and Push changes
+      run: |
+        git config --global user.name "Auto-Blogger Bot"
+        git config --global user.email "bot@example.com"
+        git add history.json dashboard.html
+        git commit -m "Update history and dashboard [skip ci]" || echo "No changes to commit"
+        git push
