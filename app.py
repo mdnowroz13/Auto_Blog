@@ -133,14 +133,22 @@ class AutoBlogger:
             "Content-Type": "application/json"
         }
         
-        # Supported Models (New Router Endpoint)
+        # Supported Models (Router Endpoint)
         models = [
             "facebook/bart-large-cnn",
             "google/flan-t5-large",
             "sshleifer/distilbart-cnn-12-6"
         ]
 
-        def query_model(prompt):
+        def validate_content(text, topic):
+            """Ensure content is relevant to the topic"""
+            if not text: return False
+            # Check if any significant word from the topic is in the text
+            keywords = [w.lower() for w in topic.split() if len(w) > 3]
+            text_lower = text.lower()
+            return any(k in text_lower for k in keywords)
+
+        def query_model(prompt, is_retry=False):
             payload = {
                 "inputs": prompt,
                 "parameters": {
@@ -150,31 +158,40 @@ class AutoBlogger:
             }
             
             for model_name in models:
-                # Construct URL using the new router endpoint
                 api_url = f"https://router.huggingface.co/hf-inference/models/{model_name}"
-                self.logger.info(f"Trying model: {model_name}...")
+                self.logger.info(f"Trying model: {model_name} (Retry: {is_retry})...")
                 
                 try:
                     resp = requests.post(api_url, headers=headers, json=payload, timeout=30)
                     
                     if resp.status_code == 200:
                         result = resp.json()
-                        if isinstance(result, list) and len(result) > 0 and 'summary_text' in result[0]:
-                            return result[0]['summary_text']
-                        elif isinstance(result, list) and len(result) > 0 and 'generated_text' in result[0]:
-                             return result[0]['generated_text']
+                        text = ""
+                        if isinstance(result, list) and len(result) > 0:
+                            text = result[0].get('summary_text') or result[0].get('generated_text')
+                        
+                        if text:
+                            # Content Validation
+                            if validate_content(text, topic):
+                                return text
+                            elif not is_retry:
+                                self.logger.warning(f"Topic drift detected in {model_name}. Regenerating...")
+                                # Recursive retry with stricter prompt
+                                strict_prompt = f"STRICTLY write about {topic}. Do not discuss anything else. {prompt}"
+                                return query_model(strict_prompt, is_retry=True)
+                            else:
+                                self.logger.warning(f"Topic drift persisted in {model_name}. Using result anyway.")
+                                return text # Return anyway if retry also failed to avoid empty content
                         else:
-                            self.logger.warning(f"Unexpected response format from {model_name}: {result}")
+                            self.logger.warning(f"Empty response from {model_name}")
                     else:
                         self.logger.warning(f"Model Error ({model_name}): {resp.status_code} - {resp.text}")
                         
                 except Exception as e:
                     self.logger.error(f"Request failed for {model_name}: {e}")
                 
-                # If we are here, the model failed. Wait briefly before trying the next model.
                 time.sleep(2)
             
-            # If loop finishes without returning, all models failed.
             self.logger.error("All models failed. Aborting content generation.")
             return None
 
@@ -191,7 +208,7 @@ class AutoBlogger:
         for key, prompt in prompts.items():
             result = query_model(prompt)
             if result is None:
-                return None # Fail fast
+                return None
             sections[key] = result
             time.sleep(2)
 
@@ -274,13 +291,17 @@ class AutoBlogger:
 
         published_url = "URL_PLACEHOLDER"
 
-        # Hashnode (Corrected Mutation)
+        # Hashnode (FIXED SCHEMA)
         if self.hashnode_pat:
             try:
                 query = """
                 mutation PublishPost($input: PublishPostInput!) {
                   publishPost(input: $input) {
-                    post { url }
+                    post {
+                      id
+                      slug
+                      url
+                    }
                   }
                 }
                 """
@@ -288,7 +309,9 @@ class AutoBlogger:
                 variables = {
                     "input": {
                         "title": title,
-                        "contentMarkdown": final_md,
+                        "content": {
+                            "markdown": final_md
+                        },
                         "tags": [{"slug": "technology", "name": "Technology"}]
                     }
                 }
