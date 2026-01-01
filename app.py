@@ -280,6 +280,40 @@ class AutoBlogger:
 
         return title, md, html
 
+    def get_hashnode_publication_id(self):
+        """Fetch the first publication ID for the user"""
+        if not self.hashnode_pat: return None
+        
+        query = """
+        query {
+          me {
+            publications(first: 1) {
+              edges {
+                node {
+                  id
+                }
+              }
+            }
+          }
+        }
+        """
+        try:
+            resp = requests.post(
+                "https://gql.hashnode.com",
+                json={'query': query},
+                headers={
+                    "Authorization": self.hashnode_pat,
+                    "Content-Type": "application/json"
+                }
+            )
+            data = resp.json()
+            edges = data.get('data', {}).get('me', {}).get('publications', {}).get('edges', [])
+            if edges:
+                return edges[0]['node']['id']
+        except Exception as e:
+            self.logger.error(f"Failed to fetch Hashnode Publication ID: {e}")
+        return None
+
     def publish(self, title, md, html, topic):
         if self.dry_run:
             self.logger.info("DRY RUN: Skipping publish.")
@@ -291,52 +325,62 @@ class AutoBlogger:
 
         published_url = "URL_PLACEHOLDER"
 
-        # Hashnode (FIXED SCHEMA)
+        # Hashnode (FIXED SCHEMA & PUBLICATION ID)
         if self.hashnode_pat:
-            try:
-                query = """
-                mutation PublishPost($input: PublishPostInput!) {
-                  publishPost(input: $input) {
-                    post {
-                      id
-                      slug
-                      url
+            pub_id = self.get_hashnode_publication_id()
+            if pub_id:
+                try:
+                    query = """
+                    mutation PublishPost($input: PublishPostInput!) {
+                      publishPost(input: $input) {
+                        post {
+                          id
+                          title
+                          slug
+                          url
+                        }
+                      }
                     }
-                  }
-                }
-                """
-                final_md = md.replace("URL_PLACEHOLDER", "this post") 
-                variables = {
-                    "input": {
-                        "title": title,
-                        "content": {
-                            "markdown": final_md
-                        },
-                        "tags": [{"slug": "technology", "name": "Technology"}]
+                    """
+                    final_md = md.replace("URL_PLACEHOLDER", "this post") 
+                    variables = {
+                        "input": {
+                            "title": title,
+                            "content": {
+                                "markdown": { # Nested as requested
+                                    "content": final_md
+                                }
+                            },
+                            "publicationId": pub_id,
+                            "tags": [{"slug": "technology", "name": "Technology"}]
+                        }
                     }
-                }
-                
-                resp = requests.post(
-                    "https://gql.hashnode.com",
-                    json={'query': query, 'variables': variables},
-                    headers={
-                        "Authorization": self.hashnode_pat,
-                        "Content-Type": "application/json"
-                    }
-                )
-                
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data.get('data', {}).get('publishPost', {}).get('post'):
-                        published_url = data['data']['publishPost']['post']['url']
-                        self.logger.info(f"Published to Hashnode: {published_url}")
-                    else:
-                        self.logger.error(f"Hashnode publish failed: {data}")
-                else:
-                    self.logger.error(f"Hashnode HTTP failed: {resp.status_code} - {resp.text}")
                     
-            except Exception as e:
-                self.logger.error(f"Hashnode publish failed: {e}")
+                    resp = requests.post(
+                        "https://gql.hashnode.com",
+                        json={'query': query, 'variables': variables},
+                        headers={
+                            "Authorization": self.hashnode_pat,
+                            "Content-Type": "application/json"
+                        }
+                    )
+                    
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if 'errors' in data:
+                             self.logger.error(f"Hashnode API Errors: {data['errors']}")
+                        elif data.get('data', {}).get('publishPost', {}).get('post'):
+                            published_url = data['data']['publishPost']['post']['url']
+                            self.logger.info(f"Published to Hashnode: {published_url}")
+                        else:
+                            self.logger.error(f"Hashnode publish failed (Unknown response): {data}")
+                    else:
+                        self.logger.error(f"Hashnode HTTP failed: {resp.status_code} - {resp.text}")
+                        
+                except Exception as e:
+                    self.logger.error(f"Hashnode publish failed: {e}")
+            else:
+                self.logger.error("Skipping Hashnode: Could not fetch Publication ID")
 
         # Dev.to
         if self.devto_key:
