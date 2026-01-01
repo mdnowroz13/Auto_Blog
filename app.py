@@ -141,18 +141,29 @@ class AutoBlogger:
         ]
 
         def validate_content(text, topic):
-            """Ensure content is relevant to the topic"""
+            """Ensure content is relevant and NOT instructional"""
             if not text: return False
-            # Check if any significant word from the topic is in the text
-            keywords = [w.lower() for w in topic.split() if len(w) > 3]
+            
+            # 1. Check for instructional phrases (Meta-talk)
+            instructional_phrases = [
+                "here is a blog", "write a blog", "in this article", 
+                "sure, i can", "i will explain", "output only", 
+                "instruction:", "prompt:"
+            ]
             text_lower = text.lower()
+            if any(phrase in text_lower for phrase in instructional_phrases):
+                self.logger.warning(f"Rejected content due to instructional phrases: {text[:50]}...")
+                return False
+
+            # 2. Check for topic relevance
+            keywords = [w.lower() for w in topic.split() if len(w) > 3]
             return any(k in text_lower for k in keywords)
 
         def query_model(prompt, is_retry=False):
             payload = {
                 "inputs": prompt,
                 "parameters": {
-                    "max_new_tokens": 250,
+                    "max_new_tokens": 300, # Increased for better quality
                     "do_sample": False
                 }
             }
@@ -175,13 +186,13 @@ class AutoBlogger:
                             if validate_content(text, topic):
                                 return text
                             elif not is_retry:
-                                self.logger.warning(f"Topic drift detected in {model_name}. Regenerating...")
-                                # Recursive retry with stricter prompt
-                                strict_prompt = f"STRICTLY write about {topic}. Do not discuss anything else. {prompt}"
+                                self.logger.warning(f"Content validation failed for {model_name}. Regenerating...")
+                                # Recursive retry with STRICTER prompt
+                                strict_prompt = f"OUTPUT ONLY THE ARTICLE TEXT. NO INSTRUCTIONS. NO META-TALK. Topic: {topic}. {prompt}"
                                 return query_model(strict_prompt, is_retry=True)
                             else:
-                                self.logger.warning(f"Topic drift persisted in {model_name}. Using result anyway.")
-                                return text # Return anyway if retry also failed to avoid empty content
+                                self.logger.warning(f"Content validation failed again in {model_name}. Using result anyway.")
+                                return text 
                         else:
                             self.logger.warning(f"Empty response from {model_name}")
                     else:
@@ -197,11 +208,12 @@ class AutoBlogger:
 
         context = " ".join(news_snippets[:8])
         
+        # STRICT PROMPTS - No "Write a..." instructions that confuse the model
         prompts = {
-            "intro": f"Write a catchy, human-like introduction for a blog post about {topic}. Start with a hook or question. Context: {context[:1000]}",
-            "body": f"Explain the key details and why this matters for {topic}. Use simple language. Context: {context[:1000]}",
-            "impact": f"What are the future consequences of {topic}? Write a short analysis. Context: {context[:1000]}",
-            "conclusion": f"Write a punchy conclusion for {topic} asking the reader for their opinion."
+            "intro": f"Topic: {topic}. Context: {context[:500]}. Output a professional, engaging introduction paragraph for a blog post. Start directly with the hook. Do not say 'Here is an intro'.",
+            "body": f"Topic: {topic}. Context: {context[:800]}. Output 3 detailed paragraphs explaining the key developments, technical details, and why this matters. Use professional tone. Do not use bullet points. Do not say 'Here is the body'.",
+            "impact": f"Topic: {topic}. Context: {context[:500]}. Output a short analysis of the future impact and consequences. Focus on 2026 predictions. Do not say 'Here is the analysis'.",
+            "conclusion": f"Topic: {topic}. Output a concluding paragraph summarizing the main point and asking the reader a thought-provoking question. Do not say 'In conclusion'."
         }
 
         sections = {}
@@ -221,16 +233,18 @@ class AutoBlogger:
         md = f"# {title}\n\n"
         md += f"**{sections['intro']}**\n\n"
         
+        # Video Embedding (Iframe)
+        if video:
+            vid_id = video['id']['videoId']
+            # We use a placeholder for markdown, but HTML will use iframe
+            md += f"[Watch Video: https://www.youtube.com/watch?v={vid_id}](https://www.youtube.com/watch?v={vid_id})\n\n"
+        
         if images:
             img = images[0]
             md += f"![{img['alt_description']}]({img['urls']['regular']})\n*Photo by {img['user']['name']} on Unsplash*\n\n"
         
         md += "## The Full Story\n"
         md += f"{sections['body']}\n\n"
-        
-        if video:
-            vid_id = video['id']['videoId']
-            md += f"[![Watch Video](https://img.youtube.com/vi/{vid_id}/0.jpg)](https://www.youtube.com/watch?v={vid_id})\n\n"
         
         md += "## Why It Matters\n"
         md += f"{sections['impact']}\n\n"
@@ -268,6 +282,14 @@ class AutoBlogger:
         html = html.replace("# ", "<h1>").replace("## ", "<h2>")
         html = html.replace("**", "<b>")
         html = re.sub(r'!\[(.*?)\]\((.*?)\)', r'<img src="\2" alt="\1" style="max-width:100%; height:auto; border-radius:10px; margin: 20px 0;" />', html)
+        
+        # Replace Video Link with Iframe
+        if video:
+             vid_id = video['id']['videoId']
+             iframe = f'<div style="text-align:center; margin: 20px 0;"><iframe width="560" height="315" src="https://www.youtube.com/embed/{vid_id}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe></div>'
+             # Regex to find the markdown link we added and replace it
+             html = re.sub(r'\[Watch Video:.*?\]\(.*?\)', iframe, html)
+
         html = re.sub(r'\[(.*?)\]\((.*?)\)', r'<a href="\2" target="_blank">\1</a>', html)
         html = html.replace("\n\n", "<p>")
         
