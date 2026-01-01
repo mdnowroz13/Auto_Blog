@@ -74,23 +74,21 @@ class AutoBlogger:
         self.logger.info("Fetching trending topics (Source: Google News RSS)...")
         topics = []
         
-        # 1. Google News RSS (Free, No Auth, Reliable)
+        # 1. Google News RSS (Curated Tech Headlines)
         try:
-            # RSS Feed for Technology (Last 24h)
-            rss_url = "https://news.google.com/rss/search?q=technology+when:1d&hl=en-US&gl=US&ceid=US:en"
+            # "TECHNOLOGY" Topic Feed - Much higher quality than a generic search
+            rss_url = "https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=en-US&gl=US&ceid=US:en"
             resp = requests.get(rss_url, timeout=10)
             if resp.status_code == 200:
                 root = ET.fromstring(resp.content)
-                # Parse items
                 for item in root.findall('.//item'):
                     title = item.find('title').text
-                    # Cleanup title (remove source name like " - The Verge")
-                    clean_title = title.split(' - ')[0]
+                    clean_title = title.split(' - ')[0] # Remove source
                     topics.append(clean_title)
         except Exception as e:
             self.logger.error(f"RSS Fetch failed: {e}")
 
-        # 2. NewsAPI Top Headlines (Free Tier Backup)
+        # 2. NewsAPI Top Headlines (Backup)
         if not topics and self.news_api_key:
              self.logger.info("RSS failed. Trying NewsAPI Headlines...")
              try:
@@ -102,9 +100,7 @@ class AutoBlogger:
              except Exception as e:
                  self.logger.error(f"NewsAPI Headlines failed: {e}")
 
-        # Filter & Select
         if topics:
-            # Shuffle to avoid always picking the first one
             random.shuffle(topics)
             for topic in topics[:15]:
                 if not utils.is_duplicate_topic(topic, self.history):
@@ -117,15 +113,26 @@ class AutoBlogger:
     def fetch_news(self, topic):
         self.logger.info(f"Fetching news for {topic}...")
         from_date = (datetime.date.today() - datetime.timedelta(days=2)).isoformat()
-        url = f"https://newsapi.org/v2/everything?q={topic}&from={from_date}&sortBy=relevancy&apiKey={self.news_api_key}"
-        try:
-            resp = requests.get(url)
-            data = resp.json()
-            articles = data.get('articles', [])[:10]
-            return [f"{a['title']}: {a['description']}" for a in articles if a['description']]
-        except Exception as e:
-            self.logger.error(f"NewsAPI failed: {e}")
-            return []
+        
+        def get_articles(query):
+            url = f"https://newsapi.org/v2/everything?q={query}&from={from_date}&sortBy=relevancy&apiKey={self.news_api_key}"
+            try:
+                resp = requests.get(url)
+                data = resp.json()
+                return data.get('articles', [])
+            except:
+                return []
+
+        # 1. Try exact topic match
+        articles = get_articles(topic)
+        
+        # 2. If no results, try first 4 words (Simpler Query)
+        if not articles:
+            simplified_topic = " ".join(topic.split()[:4])
+            self.logger.info(f"No news for exact match. Retrying with: '{simplified_topic}'")
+            articles = get_articles(simplified_topic)
+            
+        return [f"{a['title']}: {a['description']}" for a in articles[:10] if a['description']]
 
     def fetch_images(self, topic):
         self.logger.info(f"Fetching images for {topic}...")
