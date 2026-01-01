@@ -1,0 +1,11 @@
+2026-01-01 11:17:03,227 - ERROR - Google Auth failed: [Errno 2] No such file or directory: 'credentials.json'
+2026-01-01 11:17:03,227 - WARNING - Environment variable NEWSAPI_KEY not found!
+2026-01-01 11:17:03,227 - WARNING - Environment variable UNSPLASH_KEY not found!
+2026-01-01 11:17:03,228 - WARNING - Environment variable HF_TOKEN not found!
+2026-01-01 11:17:03,228 - WARNING - Environment variable HASHNODE_PAT not found!
+2026-01-01 11:17:03,228 - WARNING - Environment variable DEVTO_API_KEY not found!
+2026-01-01 11:17:03,230 - WARNING - Environment variable BLOG_ID not found!
+2026-01-01 11:17:03,230 - INFO - Fetching trending topics...
+2026-01-01 11:17:04,653 - ERROR - Trend fetch failed: The request failed: Google returned a response with code 404
+2026-01-01 11:17:04,682 - INFO - Fetching news for Technology Trends 2026...
+2026-01-01 11:17:05,570 - ERROR - No news found. Aborting.

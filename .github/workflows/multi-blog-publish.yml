@@ -1,0 +1,32 @@
+name: Multi-Blogging Publisher
+
+on:
+  schedule:
+    # Golden Hours (EST): 8 AM, 12 PM, 6 PM -> UTC: 13:00, 17:00, 23:00
+    - cron: '0 13,17,23 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
+      - run: pip install pytrends requests google-api-python-client oauth2client google-auth-httplib2 google-auth-oauthlib graphql-request
+      - name: Create Google Token
+        env:
+          GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
+        run: |
+          echo "$GOOGLE_TOKEN_JSON" > token.json
+
+      - name: Run Publisher
+        env:
+          NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          UNSPLASH_KEY: ${{ secrets.UNSPLASH_KEY }}
+          HASHNODE_PAT: ${{ secrets.HASHNODE_PAT }}
+          DEVTO_API_KEY: ${{ secrets.DEVTO_API_KEY }}
+          BLOG_ID: ${{ secrets.BLOG_ID }}
+        run: python app.py
