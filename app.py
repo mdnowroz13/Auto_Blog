@@ -16,7 +16,7 @@ import utils
 import seo_utils
 
 # Configuration
-MAX_RETRIES_PER_MODEL = 2
+# Hard fallback topics in case Google Trends fails (404)
 FALLBACK_TOPICS = [
     "Artificial Intelligence Trends 2026",
     "Quantum Computing Breakthroughs",
@@ -128,50 +128,55 @@ class AutoBlogger:
 
     def generate_content(self, topic, news_snippets):
         self.logger.info("Generating viral content...")
-        headers = {"Authorization": f"Bearer {self.hf_token}"}
+        headers = {
+            "Authorization": f"Bearer {self.hf_token}",
+            "Content-Type": "application/json"
+        }
         
-        # Supported Models (Standard API URL)
+        # Supported Models (New Router Endpoint)
         models = [
-            "https://api-inference.huggingface.co/models/facebook/bart-large-cnn",
-            "https://api-inference.huggingface.co/models/google/flan-t5-large",
-            "https://api-inference.huggingface.co/models/sshleifer/distilbart-cnn-12-6"
+            "facebook/bart-large-cnn",
+            "google/flan-t5-large",
+            "sshleifer/distilbart-cnn-12-6"
         ]
 
-        def query_model(payload):
-            for model_url in models:
-                model_name = model_url.split('/')[-1]
+        def query_model(prompt):
+            payload = {
+                "inputs": prompt,
+                "parameters": {
+                    "max_new_tokens": 250,
+                    "do_sample": False
+                }
+            }
+            
+            for model_name in models:
+                # Construct URL using the new router endpoint
+                api_url = f"https://router.huggingface.co/hf-inference/models/{model_name}"
                 self.logger.info(f"Trying model: {model_name}...")
                 
-                for i in range(MAX_RETRIES_PER_MODEL):
-                    try:
-                        # Force wait for model to prevent timeouts
-                        payload["options"] = {"wait_for_model": True, "use_cache": False}
-                        
-                        resp = requests.post(model_url, headers=headers, json=payload)
-                        if resp.status_code == 200:
-                            return resp.json()[0]['summary_text']
-                        
-                        # Handle specific errors
-                        error_msg = resp.text
-                        try: error_msg = resp.json().get('error', resp.text)
-                        except: pass
-                        
-                        self.logger.warning(f"Model Error ({model_name} - Attempt {i+1}): {error_msg}")
-                        
-                        # If model is loading, wait longer
-                        if "loading" in str(error_msg).lower():
-                            time.sleep(20)
+                try:
+                    resp = requests.post(api_url, headers=headers, json=payload, timeout=30)
+                    
+                    if resp.status_code == 200:
+                        result = resp.json()
+                        if isinstance(result, list) and len(result) > 0 and 'summary_text' in result[0]:
+                            return result[0]['summary_text']
+                        elif isinstance(result, list) and len(result) > 0 and 'generated_text' in result[0]:
+                             return result[0]['generated_text']
                         else:
-                            time.sleep(5)
-                            
-                    except Exception as e:
-                        self.logger.error(f"Request failed: {e}")
-                        time.sleep(5)
+                            self.logger.warning(f"Unexpected response format from {model_name}: {result}")
+                    else:
+                        self.logger.warning(f"Model Error ({model_name}): {resp.status_code} - {resp.text}")
+                        
+                except Exception as e:
+                    self.logger.error(f"Request failed for {model_name}: {e}")
                 
-                self.logger.warning(f"Model {model_name} failed. Switching to backup...")
+                # If we are here, the model failed. Wait briefly before trying the next model.
+                time.sleep(2)
             
+            # If loop finishes without returning, all models failed.
             self.logger.error("All models failed. Aborting content generation.")
-            return None # Hard stop
+            return None
 
         context = " ".join(news_snippets[:8])
         
@@ -184,7 +189,7 @@ class AutoBlogger:
 
         sections = {}
         for key, prompt in prompts.items():
-            result = query_model({"inputs": prompt, "parameters": {"max_length": 400, "min_length": 100}})
+            result = query_model(prompt)
             if result is None:
                 return None # Fail fast
             sections[key] = result
