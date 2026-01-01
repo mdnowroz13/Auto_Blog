@@ -356,11 +356,7 @@ class AutoBlogger:
                     variables = {
                         "input": {
                             "title": title,
-                            "content": {
-                                "markdown": { # Nested as requested
-                                    "content": final_md
-                                }
-                            },
+                            "contentMarkdown": final_md,
                             "publicationId": pub_id,
                             "tags": [{"slug": "technology", "name": "Technology"}]
                         }
