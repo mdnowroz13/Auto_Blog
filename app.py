@@ -99,39 +99,6 @@ class AutoBlogger:
             if items:
                 return items[0]
         except Exception as e:
-            self.logger.error(f"YouTube failed: {e}")
-        return None
-
-    def generate_content(self, topic, news_snippets):
-        self.logger.info("Generating viral content...")
-        headers = {"Authorization": f"Bearer {self.hf_token}"}
-        # UPDATED URL
-        api_url = "https://router.huggingface.co/models/facebook/bart-large-cnn"
-
-        def query_model(payload):
-            for i in range(5): # Retry up to 5 times
-                try:
-                    resp = requests.post(api_url, headers=headers, json=payload)
-                    if resp.status_code == 200:
-                        return resp.json()[0]['summary_text']
-                    
-                    error = resp.json().get('error', '')
-                    self.logger.warning(f"HF Error (Attempt {i+1}): {error}")
-                    
-                    # If model is loading, wait longer
-                    if "loading" in error.lower():
-                        time.sleep(20)
-                    else:
-                        time.sleep(5)
-                except Exception as e:
-                    self.logger.error(f"HF Request failed: {e}")
-                    time.sleep(5)
-            return "Content currently unavailable due to high AI traffic. Please try again later."
-
-        context = " ".join(news_snippets[:8])
-        
-        # Viral Structure Prompts
-        prompts = {
             "intro": f"Write a catchy, human-like introduction for a blog post about {topic}. Start with a hook or question. Context: {context[:1000]}",
             "body": f"Explain the key details and why this matters for {topic}. Use simple language. Context: {context[:1000]}",
             "impact": f"What are the future consequences of {topic}? Write a short analysis. Context: {context[:1000]}",
