@@ -4,12 +4,12 @@ import random
 import time
 import requests
 import os
+import json
 from pytrends.request import TrendReq
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
-from graphql_requests import GraphQLRequest
 import utils
 import seo_utils
 
@@ -105,7 +105,8 @@ class AutoBlogger:
     def generate_content(self, topic, news_snippets):
         self.logger.info("Generating viral content...")
         headers = {"Authorization": f"Bearer {self.hf_token}"}
-        api_url = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
+        # UPDATED URL
+        api_url = "https://router.huggingface.co/models/facebook/bart-large-cnn"
 
         def query_model(payload):
             for i in range(5): # Retry up to 5 times
@@ -217,11 +218,10 @@ class AutoBlogger:
 
         published_url = "URL_PLACEHOLDER"
 
-        # Hashnode
+        # Hashnode (Using requests instead of graphql-requests)
         if self.hashnode_pat:
             try:
-                client = GraphQLRequest(url="https://api.hashnode.com", headers={"Authorization": f"Bearer {self.hashnode_pat}"})
-                mutation = """
+                query = """
                 mutation PublishStory($input: PublishStoryInput!) {
                   publishStory(input: $input) {
                     success
@@ -229,34 +229,49 @@ class AutoBlogger:
                   }
                 }
                 """
-                # Replace placeholder in MD for Hashnode
                 final_md = md.replace("URL_PLACEHOLDER", "this post") 
-                vars = {
+                variables = {
                     "input": {
                         "title": title,
                         "contentMarkdown": final_md,
-                        "tags": [topic.lower().replace(" ", ""), "tech", "news"],
+                        "tags": [{"_id": "56744721958ef13879b94c7e", "slug": "technology", "name": "Technology"}], # Simplified tags
                         "isDraft": False
                     }
                 }
-                res = client.execute(mutation, vars)
-                if res.get('data', {}).get('publishStory', {}).get('success'):
-                    published_url = res['data']['publishStory']['post']['url']
-                    self.logger.info(f"Published to Hashnode: {published_url}")
+                
+                resp = requests.post(
+                    "https://api.hashnode.com",
+                    json={'query': query, 'variables': variables},
+                    headers={
+                        "Authorization": self.hashnode_pat,
+                        "Content-Type": "application/json"
+                    }
+                )
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get('data', {}).get('publishStory', {}).get('success'):
+                        published_url = data['data']['publishStory']['post']['url']
+                        self.logger.info(f"Published to Hashnode: {published_url}")
+                    else:
+                        self.logger.error(f"Hashnode publish failed: {data}")
                 else:
-                    self.logger.error(f"Hashnode publish failed. Response: {res}")
+                    self.logger.error(f"Hashnode HTTP failed: {resp.status_code} - {resp.text}")
+                    
             except Exception as e:
                 self.logger.error(f"Hashnode publish failed: {e}")
 
         # Dev.to
         if self.devto_key:
             try:
-                # Dev.to doesn't support HTML embeds easily, so we stick to MD
+                # FIXED: Wrapped in 'article'
                 payload = {
-                    "title": title,
-                    "body_markdown": md.replace("URL_PLACEHOLDER", ""), # Clean up placeholder
-                    "published": True,
-                    "tags": ["news", "trending", topic.lower().replace(" ", "")[:10]]
+                    "article": {
+                        "title": title,
+                        "body_markdown": md.replace("URL_PLACEHOLDER", ""),
+                        "published": True,
+                        "tags": ["news", "trending", "tech"]
+                    }
                 }
                 res = requests.post("https://dev.to/api/articles", json=payload, headers={"api-key": self.devto_key})
                 if res.status_code in [200, 201]:
