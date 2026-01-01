@@ -221,201 +221,139 @@ class AutoBlogger:
             result = query_model(prompt)
             if result is None:
                 return None
-    def __init__(self, dry_run=False):
-        self.dry_run = dry_run
-        self.logger = utils.logger
-        self.history = utils.load_history()
-        self.creds = self._authenticate_google()
-        
-        # API Keys
-        self.news_api_key = utils.get_env('NEWSAPI_KEY')
-        self.unsplash_key = utils.get_env('UNSPLASH_KEY')
-        self.hf_token = utils.get_env('HF_TOKEN')
-        self.hashnode_pat = utils.get_env('HASHNODE_PAT')
-        self.devto_key = utils.get_env('DEVTO_API_KEY')
-        self.blog_id = utils.get_env('BLOG_ID')
-        
-        self.validate_env()
+            sections[key] = result
+            time.sleep(2)
 
-    def validate_env(self):
-        """Fail fast if critical keys are missing"""
-        missing = []
-        if not self.news_api_key: missing.append("NEWSAPI_KEY")
-        if not self.hf_token: missing.append("HF_TOKEN")
-        if missing:
-            self.logger.error(f"Missing critical env vars: {', '.join(missing)}")
-            sys.exit(1)
+        return sections
 
-    def _authenticate_google(self):
-        SCOPES = ['https://www.googleapis.com/auth/youtube.readonly', 'https://www.googleapis.com/auth/blogger']
-        creds = None
-        if os.path.exists('token.json'):
-            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
+    def format_article(self, topic, sections, images, video):
+        title = f"{topic}: Why Everyone is Talking About It (2026)"
+        
+        # Base Markdown Construction
+        md_base = f"# {title}\n\n"
+        md_base += f"**{sections['intro']}**\n\n"
+        
+        if images:
+            img = images[0]
+            md_base += f"![{img['alt_description']}]({img['urls']['regular']})\n*Photo by {img['user']['name']} on Unsplash*\n\n"
+        
+        md_base += "## The Full Story\n"
+        md_base += f"{sections['body']}\n\n"
+        
+        md_base += "## Why It Matters\n"
+        md_base += f"{sections['impact']}\n\n"
+        
+        if len(images) > 1:
+            img = images[1]
+            md_base += f"![{img['alt_description']}]({img['urls']['regular']})\n\n"
+            
+        md_base += "## Conclusion\n"
+        md_base += f"{sections['conclusion']}\n\n"
+        md_base += "---\n"
+        
+        # Add Internal Links
+        related_links = ""
+        if len(self.history) > 0:
+            related_links = "<h3>Read More:</h3><ul>"
+            count = 0
+            for item in reversed(self.history):
+                if count >= 2: break
+                related_links += f"<li>{item['topic']}</li>" 
+                count += 1
+            related_links += "</ul>"
+
+        # Add Share Buttons
+        share_html = f"""
+        <div style="margin-top: 20px; padding: 15px; background-color: #f0f0f0; border-radius: 5px;">
+            <h3>Share this insight:</h3>
+            <a href="https://twitter.com/intent/tweet?text={title}&url=URL_PLACEHOLDER" target="_blank" style="margin-right: 10px;">Share on X</a>
+            <a href="https://wa.me/?text={title} URL_PLACEHOLDER" target="_blank">Share on WhatsApp</a>
+        </div>
+        """
+
+        # --- Platform Specific Formatting ---
+
+        # 1. Dev.to (Liquid Tags for Video)
+        md_devto = md_base
+        if video:
+            vid_id = video['id']['videoId']
+            # Insert video after intro (before "The Full Story")
+            insert_point = "**\n\n"
+            if insert_point in md_devto:
+                parts = md_devto.split(insert_point)
+                md_devto = parts[0] + insert_point + f"{{% youtube {vid_id} %}}\n\n" + parts[1]
             else:
-                try:
-                    flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-                    creds = flow.run_local_server(port=0)
-                except Exception as e:
-                    self.logger.error(f"Google Auth failed: {e}")
-                    return None
-            with open('token.json', 'w') as token:
-                token.write(creds.to_json())
-        return creds
+                md_devto += f"\n\n{{% youtube {vid_id} %}}"
 
-    def get_trending_topic(self):
-        self.logger.info("Fetching trending topics...")
-        try:
-            pytrends = TrendReq(hl='en-US', tz=360)
-            trending_searches = pytrends.trending_searches(pn='united_states')
-            topics = trending_searches[0].tolist()
-            
-            # Filter duplicates
-            for topic in topics[:10]:
-                if not utils.is_duplicate_topic(topic, self.history):
-                    self.logger.info(f"Selected Trend: {topic}")
-                    return topic
-            
-            self.logger.warning("All top trends recently covered. Picking random one.")
-            return random.choice(topics[:5])
-        except Exception as e:
-            self.logger.error(f"Trend fetch failed: {e}")
-            self.logger.info("Using fallback topic strategy.")
-            return random.choice(FALLBACK_TOPICS)
+        # 2. Hashnode (Magic Embeds)
+        md_hashnode = md_base
+        if video:
+            vid_id = video['id']['videoId']
+            vid_url = f"https://www.youtube.com/watch?v={vid_id}"
+            # Insert video after intro
+            insert_point = "**\n\n"
+            if insert_point in md_hashnode:
+                parts = md_hashnode.split(insert_point)
+                md_hashnode = parts[0] + insert_point + f"%[{vid_url}]\n\n" + parts[1]
+            else:
+                md_hashnode += f"\n\n%[{vid_url}]"
 
-    def fetch_news(self, topic):
-        self.logger.info(f"Fetching news for {topic}...")
-        from_date = (datetime.date.today() - datetime.timedelta(days=2)).isoformat()
-        url = f"https://newsapi.org/v2/everything?q={topic}&from={from_date}&sortBy=relevancy&apiKey={self.news_api_key}"
-        try:
-            resp = requests.get(url)
-            data = resp.json()
-            articles = data.get('articles', [])[:10]
-            return [f"{a['title']}: {a['description']}" for a in articles if a['description']]
-        except Exception as e:
-            self.logger.error(f"NewsAPI failed: {e}")
-            return []
-
-    def fetch_images(self, topic):
-        self.logger.info(f"Fetching images for {topic}...")
-        url = f"https://api.unsplash.com/search/photos?query={topic}&per_page=3&client_id={self.unsplash_key}"
-        try:
-            resp = requests.get(url)
-            return resp.json().get('results', [])
-        except Exception as e:
-            self.logger.error(f"Unsplash failed: {e}")
-            return []
-
-    def fetch_video(self, topic):
-        if not self.creds: return None
-        self.logger.info(f"Fetching video for {topic}...")
-        try:
-            youtube = build('youtube', 'v3', credentials=self.creds)
-            search = youtube.search().list(q=topic, part='snippet', maxResults=1, type='video').execute()
-            items = search.get('items', [])
-            if items:
-                return items[0]
-        except Exception as e:
-            self.logger.error(f"YouTube failed: {e}")
-        return None
-
-    def generate_content(self, topic, news_snippets):
-        self.logger.info("Generating viral content...")
-        headers = {
-            "Authorization": f"Bearer {self.hf_token}",
-            "Content-Type": "application/json"
-        }
+        # 3. Blogger (Robust HTML Construction)
+        html = md_base
         
-        # Supported Models (Router Endpoint)
-        models = [
-            "facebook/bart-large-cnn",
-            "google/flan-t5-large",
-            "sshleifer/distilbart-cnn-12-6"
-        ]
-
-        def validate_content(text, topic):
-            """Ensure content is relevant and NOT instructional"""
-            if not text: return False
-            
-            # 1. Check for instructional phrases (Meta-talk)
-            instructional_phrases = [
-                "here is a blog", "write a blog", "in this article", 
-                "sure, i can", "i will explain", "output only", 
-                "instruction:", "prompt:"
-            ]
-            text_lower = text.lower()
-            if any(phrase in text_lower for phrase in instructional_phrases):
-                self.logger.warning(f"Rejected content due to instructional phrases: {text[:50]}...")
-                return False
-
-            # 2. Check for topic relevance
-            keywords = [w.lower() for w in topic.split() if len(w) > 3]
-            return any(k in text_lower for k in keywords)
-
-        def query_model(prompt, is_retry=False):
-            payload = {
-                "inputs": prompt,
-                "parameters": {
-                    "max_new_tokens": 300, # Increased for better quality
-                    "do_sample": False
-                }
-            }
-            
-            for model_name in models:
-                api_url = f"https://router.huggingface.co/hf-inference/models/{model_name}"
-                self.logger.info(f"Trying model: {model_name} (Retry: {is_retry})...")
-                
-                try:
-                    resp = requests.post(api_url, headers=headers, json=payload, timeout=30)
-                    
-                    if resp.status_code == 200:
-                        result = resp.json()
-                        text = ""
-                        if isinstance(result, list) and len(result) > 0:
-                            text = result[0].get('summary_text') or result[0].get('generated_text')
-                        
-                        if text:
-                            # Content Validation
-                            if validate_content(text, topic):
-                                return text
-                            elif not is_retry:
-                                self.logger.warning(f"Content validation failed for {model_name}. Regenerating...")
-                                # Recursive retry with STRICTER prompt
-                                strict_prompt = f"OUTPUT ONLY THE ARTICLE TEXT. NO INSTRUCTIONS. NO META-TALK. Topic: {topic}. {prompt}"
-                                return query_model(strict_prompt, is_retry=True)
-                            else:
-                                self.logger.warning(f"Content validation failed again in {model_name}. Using result anyway.")
-                                return text 
-                        else:
-                            self.logger.warning(f"Empty response from {model_name}")
-                    else:
-                        self.logger.warning(f"Model Error ({model_name}): {resp.status_code} - {resp.text}")
-                        
-                except Exception as e:
-                    self.logger.error(f"Request failed for {model_name}: {e}")
-                
-                time.sleep(2)
-            
-            self.logger.error("All models failed. Aborting content generation.")
-            return None
-
-        context = " ".join(news_snippets[:8])
+        # Convert Headers (Regex with Multiline)
+        html = re.sub(r'^# (.*?)$', r"<h1 style='font-family: Arial, sans-serif; color: #333;'>\1</h1>", html, flags=re.MULTILINE)
+        html = re.sub(r'^## (.*?)$', r"<h2 style='font-family: Arial, sans-serif; color: #444; margin-top: 20px;'>\1</h2>", html, flags=re.MULTILINE)
         
-        # STRICT PROMPTS - No "Write a..." instructions that confuse the model
-        prompts = {
-            "intro": f"Topic: {topic}. Context: {context[:500]}. Output a professional, engaging introduction paragraph for a blog post. Start directly with the hook. Do not say 'Here is an intro'.",
-            "body": f"Topic: {topic}. Context: {context[:800]}. Output 3 detailed paragraphs explaining the key developments, technical details, and why this matters. Use professional tone. Do not use bullet points. Do not say 'Here is the body'.",
-            "impact": f"Topic: {topic}. Context: {context[:500]}. Output a short analysis of the future impact and consequences. Focus on 2026 predictions. Do not say 'Here is the analysis'.",
-            "conclusion": f"Topic: {topic}. Output a concluding paragraph summarizing the main point and asking the reader a thought-provoking question. Do not say 'In conclusion'."
-        }
+        # Convert Bold
+        html = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', html)
+        
+        # Convert Images
+        html = re.sub(r'!\[(.*?)\]\((.*?)\)', r'<div style="text-align:center; margin: 20px 0;"><img src="\2" alt="\1" style="max-width:100%; height:auto; border-radius:10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);" /></div>', html)
+        
+        # Convert Links
+        html = re.sub(r'\[(.*?)\]\((.*?)\)', r'<a href="\2" target="_blank" style="color: #007bff; text-decoration: none;">\1</a>', html)
 
-        sections = {}
-        for key, prompt in prompts.items():
-            result = query_model(prompt)
-            if result is None:
-                return None
+        # Process Paragraphs (Block-based)
+        blocks = html.split('\n\n')
+        final_html_parts = []
+        
+        for block in blocks:
+            block = block.strip()
+            if not block: continue
+            
+            # If block is already a tag (h1, h2, div), leave it alone
+            if block.startswith('<h1') or block.startswith('<h2') or block.startswith('<div'):
+                final_html_parts.append(block)
+            else:
+                # Wrap text in styled paragraph
+                final_html_parts.append(f"<p style='font-family: Georgia, serif; font-size: 18px; line-height: 1.6; color: #222; margin-bottom: 20px;'>{block}</p>")
+        
+        html = "".join(final_html_parts)
+
+        # Insert Video (Iframe)
+        if video:
+             vid_id = video['id']['videoId']
+             iframe = f'<div style="text-align:center; margin: 30px 0; clear: both;"><iframe width="560" height="315" src="https://www.youtube.com/embed/{vid_id}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="max-width: 100%;"></iframe></div>'
+             # Insert after the first paragraph (Intro)
+             if "</p>" in html:
+                 html = html.replace("</p>", "</p>" + iframe, 1)
+             else:
+                 html += iframe
+        
+        html += related_links + share_html
+
+        # Add Schema & Meta
+        schema = seo_utils.generate_schema(topic, sections['intro'])
+        meta = seo_utils.generate_meta_tags(topic, sections['intro'])
+        html = meta + schema + html
+
+        return title, md_devto, md_hashnode, html
+
+    def get_hashnode_publication_id(self):
+        """Fetch the first publication ID for the user"""
+        if not self.hashnode_pat: return None
+        
         query = """
         query {
           me {
