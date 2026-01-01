@@ -108,8 +108,24 @@ class AutoBlogger:
         api_url = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
 
         def query_model(payload):
-            resp = requests.post(api_url, headers=headers, json=payload)
-            return resp.json()[0]['summary_text'] if resp.status_code == 200 and resp.json() else "Content unavailable."
+            for i in range(5): # Retry up to 5 times
+                try:
+                    resp = requests.post(api_url, headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        return resp.json()[0]['summary_text']
+                    
+                    error = resp.json().get('error', '')
+                    self.logger.warning(f"HF Error (Attempt {i+1}): {error}")
+                    
+                    # If model is loading, wait longer
+                    if "loading" in error.lower():
+                        time.sleep(20)
+                    else:
+                        time.sleep(5)
+                except Exception as e:
+                    self.logger.error(f"HF Request failed: {e}")
+                    time.sleep(5)
+            return "Content currently unavailable due to high AI traffic. Please try again later."
 
         context = " ".join(news_snippets[:8])
         
@@ -224,9 +240,11 @@ class AutoBlogger:
                     }
                 }
                 res = client.execute(mutation, vars)
-                if res['data']['publishStory']['success']:
+                if res.get('data', {}).get('publishStory', {}).get('success'):
                     published_url = res['data']['publishStory']['post']['url']
                     self.logger.info(f"Published to Hashnode: {published_url}")
+                else:
+                    self.logger.error(f"Hashnode publish failed. Response: {res}")
             except Exception as e:
                 self.logger.error(f"Hashnode publish failed: {e}")
 
@@ -245,6 +263,8 @@ class AutoBlogger:
                     url = res.json()['url']
                     self.logger.info(f"Published to Dev.to: {url}")
                     if published_url == "URL_PLACEHOLDER": published_url = url
+                else:
+                    self.logger.error(f"Dev.to publish failed: {res.status_code} - {res.text}")
             except Exception as e:
                 self.logger.error(f"Dev.to publish failed: {e}")
 
