@@ -291,6 +291,7 @@ class AutoBlogger:
               edges {
                 node {
                   id
+                  title
                 }
               }
             }
@@ -307,9 +308,18 @@ class AutoBlogger:
                 }
             )
             data = resp.json()
+            if 'errors' in data:
+                self.logger.error(f"Hashnode Pub ID Error: {data['errors']}")
+                return None
+                
             edges = data.get('data', {}).get('me', {}).get('publications', {}).get('edges', [])
             if edges:
-                return edges[0]['node']['id']
+                pub_id = edges[0]['node']['id']
+                self.logger.info(f"Found Hashnode Publication ID: {pub_id}")
+                return pub_id
+            else:
+                self.logger.warning("No Hashnode publications found.")
+                
         except Exception as e:
             self.logger.error(f"Failed to fetch Hashnode Publication ID: {e}")
         return None
