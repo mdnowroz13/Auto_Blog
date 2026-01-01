@@ -6,6 +6,7 @@ import requests
 import os
 import re
 import json
+import sys
 from pytrends.request import TrendReq
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
@@ -13,6 +14,16 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 import utils
 import seo_utils
+
+# Configuration
+MAX_RETRIES_PER_MODEL = 2
+FALLBACK_TOPICS = [
+    "Artificial Intelligence Trends 2026",
+    "Quantum Computing Breakthroughs",
+    "Sustainable Energy Innovations",
+    "Space Exploration Updates 2026",
+    "Future of Remote Work"
+]
 
 class AutoBlogger:
     def __init__(self, dry_run=False):
@@ -28,6 +39,17 @@ class AutoBlogger:
         self.hashnode_pat = utils.get_env('HASHNODE_PAT')
         self.devto_key = utils.get_env('DEVTO_API_KEY')
         self.blog_id = utils.get_env('BLOG_ID')
+        
+        self.validate_env()
+
+    def validate_env(self):
+        """Fail fast if critical keys are missing"""
+        missing = []
+        if not self.news_api_key: missing.append("NEWSAPI_KEY")
+        if not self.hf_token: missing.append("HF_TOKEN")
+        if missing:
+            self.logger.error(f"Missing critical env vars: {', '.join(missing)}")
+            sys.exit(1)
 
     def _authenticate_google(self):
         SCOPES = ['https://www.googleapis.com/auth/youtube.readonly', 'https://www.googleapis.com/auth/blogger']
@@ -56,7 +78,7 @@ class AutoBlogger:
             topics = trending_searches[0].tolist()
             
             # Filter duplicates
-            for topic in topics[:10]: # Check top 10
+            for topic in topics[:10]:
                 if not utils.is_duplicate_topic(topic, self.history):
                     self.logger.info(f"Selected Trend: {topic}")
                     return topic
@@ -65,7 +87,8 @@ class AutoBlogger:
             return random.choice(topics[:5])
         except Exception as e:
             self.logger.error(f"Trend fetch failed: {e}")
-            return "Technology Trends 2026" # Fallback
+            self.logger.info("Using fallback topic strategy.")
+            return random.choice(FALLBACK_TOPICS)
 
     def fetch_news(self, topic):
         self.logger.info(f"Fetching news for {topic}...")
@@ -107,45 +130,51 @@ class AutoBlogger:
         self.logger.info("Generating viral content...")
         headers = {"Authorization": f"Bearer {self.hf_token}"}
         
-        # Primary and Fallback Models (UPDATED URLs)
+        # Supported Models (Standard API URL)
         models = [
-            "https://router.huggingface.co/models/facebook/bart-large-cnn",
-            "https://router.huggingface.co/models/google/flan-t5-large",
-            "https://router.huggingface.co/models/sshleifer/distilbart-cnn-12-6"
+            "https://api-inference.huggingface.co/models/facebook/bart-large-cnn",
+            "https://api-inference.huggingface.co/models/google/flan-t5-large",
+            "https://api-inference.huggingface.co/models/sshleifer/distilbart-cnn-12-6"
         ]
 
         def query_model(payload):
-            # Try each model in order
             for model_url in models:
-                self.logger.info(f"Trying model: {model_url.split('/')[-1]}...")
+                model_name = model_url.split('/')[-1]
+                self.logger.info(f"Trying model: {model_name}...")
                 
-                for i in range(3): # Retry 3 times per model
+                for i in range(MAX_RETRIES_PER_MODEL):
                     try:
-                        # Force wait for model
+                        # Force wait for model to prevent timeouts
                         payload["options"] = {"wait_for_model": True, "use_cache": False}
                         
                         resp = requests.post(model_url, headers=headers, json=payload)
                         if resp.status_code == 200:
                             return resp.json()[0]['summary_text']
                         
-                        error = resp.text
-                        try: error = resp.json().get('error', resp.text)
+                        # Handle specific errors
+                        error_msg = resp.text
+                        try: error_msg = resp.json().get('error', resp.text)
                         except: pass
                         
-                        self.logger.warning(f"Model Error ({model_url.split('/')[-1]} - Attempt {i+1}): {error}")
-                        time.sleep(5)
+                        self.logger.warning(f"Model Error ({model_name} - Attempt {i+1}): {error_msg}")
                         
+                        # If model is loading, wait longer
+                        if "loading" in str(error_msg).lower():
+                            time.sleep(20)
+                        else:
+                            time.sleep(5)
+                            
                     except Exception as e:
                         self.logger.error(f"Request failed: {e}")
                         time.sleep(5)
                 
-                self.logger.warning(f"Model {model_url.split('/')[-1]} failed. Switching to backup...")
+                self.logger.warning(f"Model {model_name} failed. Switching to backup...")
             
-            return "Content currently unavailable. Please check back later."
+            self.logger.error("All models failed. Aborting content generation.")
+            return None # Hard stop
 
         context = " ".join(news_snippets[:8])
         
-        # Viral Structure Prompts
         prompts = {
             "intro": f"Write a catchy, human-like introduction for a blog post about {topic}. Start with a hook or question. Context: {context[:1000]}",
             "body": f"Explain the key details and why this matters for {topic}. Use simple language. Context: {context[:1000]}",
@@ -155,8 +184,11 @@ class AutoBlogger:
 
         sections = {}
         for key, prompt in prompts.items():
-            sections[key] = query_model({"inputs": prompt, "parameters": {"max_length": 400, "min_length": 100}})
-            time.sleep(2) # Rate limit
+            result = query_model({"inputs": prompt, "parameters": {"max_length": 400, "min_length": 100}})
+            if result is None:
+                return None # Fail fast
+            sections[key] = result
+            time.sleep(2)
 
         return sections
 
@@ -189,7 +221,7 @@ class AutoBlogger:
         md += f"{sections['conclusion']}\n\n"
         md += "---\n"
         
-        # Add Internal Links (Retention)
+        # Add Internal Links
         related_links = ""
         if len(self.history) > 0:
             related_links = "<h3>Read More:</h3><ul>"
@@ -200,7 +232,7 @@ class AutoBlogger:
                 count += 1
             related_links += "</ul>"
 
-        # Add Share Buttons (Viral Reach)
+        # Add Share Buttons
         share_html = f"""
         <div style="margin-top: 20px; padding: 15px; background-color: #f0f0f0; border-radius: 5px;">
             <h3>Share this insight:</h3>
@@ -209,20 +241,14 @@ class AutoBlogger:
         </div>
         """
 
-        # Better HTML Conversion
+        # HTML Conversion
         html = md
-        # Convert Headers
         html = html.replace("# ", "<h1>").replace("## ", "<h2>")
-        # Convert Bold
         html = html.replace("**", "<b>")
-        # Convert Images: ![alt](url) -> <img src="url" alt="alt" />
         html = re.sub(r'!\[(.*?)\]\((.*?)\)', r'<img src="\2" alt="\1" style="max-width:100%; height:auto; border-radius:10px; margin: 20px 0;" />', html)
-        # Convert Links: [text](url) -> <a href="url">text</a>
         html = re.sub(r'\[(.*?)\]\((.*?)\)', r'<a href="\2" target="_blank">\1</a>', html)
-        # Convert Newlines to Paragraphs
         html = html.replace("\n\n", "<p>")
         
-        # Inject Share Buttons & Related Links before the end
         html += related_links + share_html
 
         # Add Schema & Meta
@@ -243,13 +269,12 @@ class AutoBlogger:
 
         published_url = "URL_PLACEHOLDER"
 
-        # Hashnode (UPDATED MUTATION)
+        # Hashnode (Corrected Mutation)
         if self.hashnode_pat:
             try:
                 query = """
                 mutation PublishPost($input: PublishPostInput!) {
                   publishPost(input: $input) {
-                    success
                     post { url }
                   }
                 }
@@ -259,8 +284,7 @@ class AutoBlogger:
                     "input": {
                         "title": title,
                         "contentMarkdown": final_md,
-                        "tags": [{"slug": "technology", "name": "Technology"}], 
-                        # "isDraft": False # Removed isDraft as it might be default or different in new API
+                        "tags": [{"slug": "technology", "name": "Technology"}]
                     }
                 }
                 
@@ -275,7 +299,7 @@ class AutoBlogger:
                 
                 if resp.status_code == 200:
                     data = resp.json()
-                    if data.get('data', {}).get('publishPost', {}).get('success'):
+                    if data.get('data', {}).get('publishPost', {}).get('post'):
                         published_url = data['data']['publishPost']['post']['url']
                         self.logger.info(f"Published to Hashnode: {published_url}")
                     else:
@@ -311,7 +335,6 @@ class AutoBlogger:
         if self.creds and self.blog_id:
             try:
                 service = build('blogger', 'v3', credentials=self.creds)
-                # Inject real URL into share buttons if available
                 final_html = html.replace("URL_PLACEHOLDER", published_url if published_url != "URL_PLACEHOLDER" else "")
                 post = {'title': title, 'content': final_html, 'labels': [topic]}
                 res = service.posts().insert(blogId=self.blog_id, body=post).execute()
@@ -334,6 +357,10 @@ class AutoBlogger:
         video = self.fetch_video(topic)
         
         sections = self.generate_content(topic, news)
+        if not sections:
+            self.logger.error("Content generation failed. Exiting.")
+            return
+
         title, md, html = self.format_article(topic, sections, images, video)
         
         self.publish(title, md, html, topic)
